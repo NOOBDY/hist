@@ -7,6 +7,7 @@ use vulkano::command_buffer::{
     AutoCommandBufferBuilder, CommandBufferUsage, PrimaryAutoCommandBuffer, RenderPassBeginInfo,
     SubpassBeginInfo, SubpassContents, SubpassEndInfo,
 };
+use vulkano::descriptor_set::DescriptorSet;
 use vulkano::device::physical::{PhysicalDevice, PhysicalDeviceType};
 use vulkano::device::{Device, DeviceExtensions, Queue, QueueFlags};
 use vulkano::image::view::ImageView;
@@ -20,7 +21,9 @@ use vulkano::pipeline::graphics::vertex_input::{Vertex, VertexDefinition};
 use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
-use vulkano::pipeline::{GraphicsPipeline, PipelineLayout, PipelineShaderStageCreateInfo};
+use vulkano::pipeline::{
+    GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo
+};
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
 use vulkano::shader::{ShaderModule, ShaderModuleCreateInfo};
 use vulkano::swapchain::{Surface, Swapchain};
@@ -31,6 +34,15 @@ pub struct MyVertex {
     #[format(R32G32_SFLOAT)]
     pub position: [f32; 2],
 }
+
+#[derive(Clone, Copy, Debug)]
+#[repr(C)]
+pub struct UB {
+    pub color: cgmath::Vector4<f32>,
+}
+
+unsafe impl bytemuck::Pod for UB {}
+unsafe impl bytemuck::Zeroable for UB {}
 
 pub fn select_physical_device(
     instance: &Arc<Instance>,
@@ -157,6 +169,8 @@ pub fn get_command_buffers(
     queue: &Arc<Queue>,
     pipeline: &Arc<GraphicsPipeline>,
     framebuffers: &Vec<Arc<Framebuffer>>,
+    descriptor_set: &Arc<DescriptorSet>,
+    descriptor_set_index: u32,
     vertex_buffer: &Subbuffer<[MyVertex]>,
 ) -> anyhow::Result<Vec<Arc<PrimaryAutoCommandBuffer>>> {
     framebuffers
@@ -181,9 +195,14 @@ pub fn get_command_buffers(
                         },
                     )?
                     .bind_pipeline_graphics(pipeline.clone())?
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Graphics,
+                        pipeline.layout().clone(),
+                        descriptor_set_index,
+                        descriptor_set.clone(),
+                    )?
                     .bind_vertex_buffers(0, vertex_buffer.clone())?
-                    .draw(vertex_buffer.len() as u32, 1, 0, 0)
-                    .unwrap()
+                    .draw(vertex_buffer.len() as u32, 1, 0, 0)?
                     .end_render_pass(SubpassEndInfo::default())?;
             };
 

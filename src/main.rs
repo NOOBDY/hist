@@ -1,15 +1,20 @@
 use anyhow::Context;
+use cgmath::Vector4;
 use hist::*;
 use std::sync::Arc;
+use vulkano::buffer::allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo};
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
 use vulkano::command_buffer::{CommandBufferExecFuture, PrimaryAutoCommandBuffer};
+use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
 use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
 use vulkano::image::{Image, ImageUsage};
 use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
 use vulkano::library::VulkanLibrary;
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
 use vulkano::pipeline::graphics::viewport::Viewport;
+use vulkano::pipeline::Pipeline;
 use vulkano::render_pass::RenderPass;
 use vulkano::shader::ShaderModule;
 use vulkano::swapchain::{
@@ -35,8 +40,26 @@ struct VkContext {
     vs: Arc<ShaderModule>,
     fs: Arc<ShaderModule>,
     vertex_buffer: Subbuffer<[MyVertex]>,
+    uniform_buffer_allocator: SubbufferAllocator,
+    descriptor_set: Arc<DescriptorSet>,
+    descriptor_set_layout_index: u32,
     command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
     command_buffers: Vec<Arc<PrimaryAutoCommandBuffer>>,
+}
+
+fn rgb_cycle(counter: f32) -> cgmath::Vector4<f32> {
+    let phase = counter * 6.0; // Scale to match the 6 phases of the color wheel
+    let phase_int = phase.floor() as i32; // Determine the current phase
+
+    match phase_int {
+        0 => Vector4::new(1.0, phase.fract(), 0.0, 1.0), // Red to Yellow
+        1 => Vector4::new(1.0 - phase.fract(), 1.0, 0.0, 1.0), // Yellow to Green
+        2 => Vector4::new(0.0, 1.0, phase.fract(), 1.0), // Green to Cyan
+        3 => Vector4::new(0.0, 1.0 - phase.fract(), 1.0, 1.0), // Cyan to Blue
+        4 => Vector4::new(phase.fract(), 0.0, 1.0, 1.0), // Blue to Magenta
+        5 => Vector4::new(1.0, 0.0, 1.0 - phase.fract(), 1.0), // Magenta to Red
+        _ => unreachable!(),                             // Should never reach here
+    }
 }
 
 impl VkContext {
@@ -130,6 +153,16 @@ impl VkContext {
             vec![vertex1, vertex2, vertex3],
         )?;
 
+        let uniform_buffer_allocator = SubbufferAllocator::new(
+            memory_allocator.clone(),
+            SubbufferAllocatorCreateInfo {
+                buffer_usage: BufferUsage::UNIFORM_BUFFER,
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+        );
+
         let vs = load_shader(device.clone(), "./shader/test.vert.spv")
             .context("failed to create vertex shader")?;
         let fs = load_shader(device.clone(), "./shader/test.frag.spv")
@@ -149,6 +182,38 @@ impl VkContext {
             viewport.clone(),
         )?;
 
+        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
+            device.clone(),
+            Default::default(),
+        ));
+
+        let uniform_buffer = uniform_buffer_allocator.allocate_sized()?;
+
+        let ub = UB {
+            color: cgmath::Vector4 {
+                x: 0.0,
+                y: 1.0,
+                z: 1.0,
+                w: 1.0,
+            },
+        };
+
+        *uniform_buffer.write().unwrap() = ub;
+
+        let descriptor_set_layout_index = 0;
+        let descriptor_set_layout = pipeline
+            .layout()
+            .set_layouts()
+            .get(descriptor_set_layout_index)
+            .unwrap();
+
+        let descriptor_set = DescriptorSet::new(
+            descriptor_set_allocator.clone(),
+            descriptor_set_layout.clone(),
+            [WriteDescriptorSet::buffer(0, uniform_buffer.clone())],
+            [],
+        )?;
+
         let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
             device.clone(),
             Default::default(),
@@ -159,6 +224,8 @@ impl VkContext {
             &queue,
             &pipeline,
             &framebuffers,
+            &descriptor_set,
+            descriptor_set_layout_index as u32,
             &vertex_buffer,
         )?;
 
@@ -172,6 +239,9 @@ impl VkContext {
             vs,
             fs,
             vertex_buffer,
+            uniform_buffer_allocator,
+            descriptor_set,
+            descriptor_set_layout_index: descriptor_set_layout_index as u32,
             command_buffer_allocator,
             command_buffers,
         })
@@ -185,6 +255,8 @@ struct App {
 
     windows_resized: bool,
     recreate_swapchain: bool,
+
+    counter: f32,
 
     fences: Vec<
         Option<
@@ -208,7 +280,7 @@ impl ApplicationHandler for App {
 
         if let Ok(window) = event_loop.create_window(attributes) {
             let first_window_handle = self.window.is_none();
-            let window_handle = Arc::new(window);
+            let _window_handle = Arc::new(window);
 
             if first_window_handle {
                 let window = Arc::new(
@@ -245,8 +317,6 @@ impl ApplicationHandler for App {
                     .request_redraw();
 
                 self.windows_resized = true;
-
-                println!("resize");
             }
             WindowEvent::RedrawRequested => {
                 let window = self
@@ -265,14 +335,35 @@ impl ApplicationHandler for App {
                     vs,
                     fs,
                     vertex_buffer,
+                    uniform_buffer_allocator,
+                    ref mut descriptor_set,
+                    descriptor_set_layout_index,
                     command_buffer_allocator,
                     ref mut command_buffers,
                     ..
                 } = self.context.as_mut().expect("no context found");
 
+                self.counter += 0.01;
+
+                println!("{}", self.counter);
+
+                let uniform_buffer = uniform_buffer_allocator.allocate_sized().unwrap();
+
+                let ub = UB {
+                    color: rgb_cycle(self.counter),
+                };
+
+                *uniform_buffer.write().unwrap() = ub;
+
+                // i have no fucking idea
+                unsafe {
+                    descriptor_set
+                        .update_by_ref([WriteDescriptorSet::buffer(0, uniform_buffer.clone())], [])
+                        .unwrap();
+                }
+
                 if self.windows_resized || self.recreate_swapchain {
                     self.recreate_swapchain = false;
-
                     let new_dimensions = window.inner_size();
 
                     let (new_swapchain, new_images) = swapchain
@@ -304,6 +395,8 @@ impl ApplicationHandler for App {
                             &queue,
                             &new_pipeline,
                             &new_framebuffers,
+                            &descriptor_set,
+                            *descriptor_set_layout_index,
                             &vertex_buffer,
                         )
                         .unwrap();
