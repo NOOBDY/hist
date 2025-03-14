@@ -47,19 +47,19 @@ struct VkContext {
     command_buffers: Vec<Arc<PrimaryAutoCommandBuffer>>,
 }
 
-fn rgb_cycle(counter: f32) -> cgmath::Vector4<f32> {
-    let phase = counter * 6.0; // Scale to match the 6 phases of the color wheel
-    let phase_int = phase.floor() as i32; // Determine the current phase
+fn rgb_cycle(counter: i32) -> Vector4<f32> {
+    let phase = (counter % 1536) as u32; // Cycle through 1536 steps (256 * 6)
+                                         //
+    let (r, g, b) = match phase {
+        0..=255 => (1.0, phase as f32 / 255.0, 0.0), // Red to Yellow
+        256..=511 => ((511.0 - phase as f32) / 255.0, 1.0, 0.0), // Yellow to Green
+        512..=767 => (0.0, 1.0, (phase as f32 - 512.0) / 255.0), // Green to Cyan
+        768..=1023 => (0.0, (1023.0 - phase as f32) / 255.0, 1.0), // Cyan to Blue
+        1024..=1279 => ((phase as f32 - 1024.0) / 255.0, 0.0, 1.0), // Blue to Magenta
+        _ => (1.0, 0.0, (1535.0 - phase as f32) / 255.0), // Magenta to Red
+    };
 
-    match phase_int {
-        0 => Vector4::new(1.0, phase.fract(), 0.0, 1.0), // Red to Yellow
-        1 => Vector4::new(1.0 - phase.fract(), 1.0, 0.0, 1.0), // Yellow to Green
-        2 => Vector4::new(0.0, 1.0, phase.fract(), 1.0), // Green to Cyan
-        3 => Vector4::new(0.0, 1.0 - phase.fract(), 1.0, 1.0), // Cyan to Blue
-        4 => Vector4::new(phase.fract(), 0.0, 1.0, 1.0), // Blue to Magenta
-        5 => Vector4::new(1.0, 0.0, 1.0 - phase.fract(), 1.0), // Magenta to Red
-        _ => unreachable!(),                             // Should never reach here
-    }
+    Vector4::new(r, g, b, 1.0)
 }
 
 impl VkContext {
@@ -256,7 +256,7 @@ struct App {
     windows_resized: bool,
     recreate_swapchain: bool,
 
-    counter: f32,
+    counter: i32,
 
     fences: Vec<
         Option<
@@ -325,6 +325,7 @@ impl ApplicationHandler for App {
                     .expect("redraw request without a window");
 
                 window.pre_present_notify();
+                window.request_redraw();
 
                 let VkContext {
                     device,
@@ -343,7 +344,7 @@ impl ApplicationHandler for App {
                     ..
                 } = self.context.as_mut().expect("no context found");
 
-                self.counter += 0.01;
+                self.counter += 1;
 
                 println!("{}", self.counter);
 
@@ -362,46 +363,45 @@ impl ApplicationHandler for App {
                         .unwrap();
                 }
 
-                if self.windows_resized || self.recreate_swapchain {
-                    self.recreate_swapchain = false;
-                    let new_dimensions = window.inner_size();
+                // if self.windows_resized || self.recreate_swapchain {
+                self.recreate_swapchain = false;
+                let new_dimensions = window.inner_size();
 
-                    let (new_swapchain, new_images) = swapchain
-                        .recreate(SwapchainCreateInfo {
-                            image_extent: new_dimensions.into(),
-                            ..swapchain.create_info()
-                        })
-                        .unwrap();
+                let (new_swapchain, new_images) = swapchain
+                    .recreate(SwapchainCreateInfo {
+                        image_extent: new_dimensions.into(),
+                        ..swapchain.create_info()
+                    })
+                    .unwrap();
 
-                    *swapchain = new_swapchain;
-                    let new_framebuffers =
-                        get_framebuffers(&new_images, render_pass.clone()).unwrap();
+                *swapchain = new_swapchain;
+                let new_framebuffers = get_framebuffers(&new_images, render_pass.clone()).unwrap();
 
-                    if self.windows_resized {
-                        self.windows_resized = false;
+                //     if self.windows_resized {
+                //         self.windows_resized = false;
 
-                        viewport.extent = new_dimensions.into();
-                        let new_pipeline = get_pipeline(
-                            device.clone(),
-                            vs.clone(),
-                            fs.clone(),
-                            render_pass.clone(),
-                            viewport.clone(),
-                        )
-                        .unwrap();
+                viewport.extent = new_dimensions.into();
+                let new_pipeline = get_pipeline(
+                    device.clone(),
+                    vs.clone(),
+                    fs.clone(),
+                    render_pass.clone(),
+                    viewport.clone(),
+                )
+                .unwrap();
 
-                        *command_buffers = get_command_buffers(
-                            &command_buffer_allocator,
-                            &queue,
-                            &new_pipeline,
-                            &new_framebuffers,
-                            &descriptor_set,
-                            *descriptor_set_layout_index,
-                            &vertex_buffer,
-                        )
-                        .unwrap();
-                    }
-                }
+                *command_buffers = get_command_buffers(
+                    &command_buffer_allocator,
+                    &queue,
+                    &new_pipeline,
+                    &new_framebuffers,
+                    &descriptor_set,
+                    *descriptor_set_layout_index,
+                    &vertex_buffer,
+                )
+                .unwrap();
+                //     }
+                // }
 
                 let (image_i, suboptimal, acquire_future) =
                     match swapchain::acquire_next_image(swapchain.clone(), None)
