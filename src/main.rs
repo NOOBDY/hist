@@ -40,6 +40,7 @@ struct VkContext {
     vs: Arc<ShaderModule>,
     fs: Arc<ShaderModule>,
     vertex_buffer: Subbuffer<[MyVertex]>,
+    index_buffer: Subbuffer<[u32]>,
     uniform_buffer_allocator: SubbufferAllocator,
     descriptor_set: Arc<DescriptorSet>,
     descriptor_set_layout_index: u32,
@@ -131,13 +132,16 @@ impl VkContext {
         let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
 
         let vertex1 = MyVertex {
-            position: [-0.5, -0.5],
+            position: [1.0, 1.0],
         };
         let vertex2 = MyVertex {
-            position: [0.0, 0.5],
+            position: [-1.0, 1.0],
         };
         let vertex3 = MyVertex {
-            position: [0.5, -0.25],
+            position: [-1.0, -1.0],
+        };
+        let vertex4 = MyVertex {
+            position: [1.0, -1.0],
         };
         let vertex_buffer = Buffer::from_iter(
             memory_allocator.clone(),
@@ -150,7 +154,23 @@ impl VkContext {
                     | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-            vec![vertex1, vertex2, vertex3],
+            vec![vertex1, vertex2, vertex3, vertex4],
+        )?;
+
+        let indices = vec![0, 2, 1, 0, 3, 2];
+
+        let index_buffer = Buffer::from_iter(
+            memory_allocator.clone(),
+            BufferCreateInfo {
+                usage: BufferUsage::INDEX_BUFFER,
+                ..Default::default()
+            },
+            AllocationCreateInfo {
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+                ..Default::default()
+            },
+            indices,
         )?;
 
         let uniform_buffer_allocator = SubbufferAllocator::new(
@@ -227,6 +247,7 @@ impl VkContext {
             &descriptor_set,
             descriptor_set_layout_index as u32,
             &vertex_buffer,
+            &index_buffer,
         )?;
 
         Ok(VkContext {
@@ -239,6 +260,7 @@ impl VkContext {
             vs,
             fs,
             vertex_buffer,
+            index_buffer,
             uniform_buffer_allocator,
             descriptor_set,
             descriptor_set_layout_index: descriptor_set_layout_index as u32,
@@ -336,6 +358,7 @@ impl ApplicationHandler for App {
                     vs,
                     fs,
                     vertex_buffer,
+                    index_buffer,
                     uniform_buffer_allocator,
                     ref mut descriptor_set,
                     descriptor_set_layout_index,
@@ -398,6 +421,7 @@ impl ApplicationHandler for App {
                     &descriptor_set,
                     *descriptor_set_layout_index,
                     &vertex_buffer,
+                    &index_buffer,
                 )
                 .unwrap();
                 //     }

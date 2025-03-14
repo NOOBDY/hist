@@ -22,7 +22,7 @@ use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
 use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
 use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
 use vulkano::pipeline::{
-    GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo
+    GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout, PipelineShaderStageCreateInfo,
 };
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
 use vulkano::shader::{ShaderModule, ShaderModuleCreateInfo};
@@ -172,6 +172,7 @@ pub fn get_command_buffers(
     descriptor_set: &Arc<DescriptorSet>,
     descriptor_set_index: u32,
     vertex_buffer: &Subbuffer<[MyVertex]>,
+    index_buffer: &Subbuffer<[u32]>,
 ) -> anyhow::Result<Vec<Arc<PrimaryAutoCommandBuffer>>> {
     framebuffers
         .iter()
@@ -202,7 +203,8 @@ pub fn get_command_buffers(
                         descriptor_set.clone(),
                     )?
                     .bind_vertex_buffers(0, vertex_buffer.clone())?
-                    .draw(vertex_buffer.len() as u32, 1, 0, 0)?
+                    .bind_index_buffer(index_buffer.clone())?
+                    .draw_indexed(index_buffer.len() as u32, 1, 0, 0, 0)?
                     .end_render_pass(SubpassEndInfo::default())?;
             };
 
