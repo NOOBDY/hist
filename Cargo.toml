@@ -7,5 +7,6 @@ edition = "2021"
 anyhow = "1.0.97"
 bytemuck = { version = "1.22.0", features = ["derive"] }
 cgmath = { version = "0.18.0", features = ["swizzle"] }
+clap = { version = "4.5.32", features = ["derive"] }
 vulkano = "0.35.1"
 winit = "0.30.9"

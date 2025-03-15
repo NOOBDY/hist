@@ -1,4 +1,5 @@
 use anyhow::Context;
+use cgmath::Vector4;
 use std::path::Path;
 use std::sync::Arc;
 use vulkano::buffer::{BufferContents, Subbuffer};
@@ -221,4 +222,19 @@ where
     let words = vulkano::shader::spirv::bytes_to_words(&bytes)?;
     let shader = unsafe { ShaderModule::new(device, ShaderModuleCreateInfo::new(&words))? };
     Ok(shader)
+}
+
+pub fn rgb_cycle(counter: i32) -> Vector4<f32> {
+    let phase = (counter % 1536) as u32; // Cycle through 1536 steps (256 * 6)
+                                         //
+    let (r, g, b) = match phase {
+        0..=255 => (1.0, phase as f32 / 255.0, 0.0), // Red to Yellow
+        256..=511 => ((511.0 - phase as f32) / 255.0, 1.0, 0.0), // Yellow to Green
+        512..=767 => (0.0, 1.0, (phase as f32 - 512.0) / 255.0), // Green to Cyan
+        768..=1023 => (0.0, (1023.0 - phase as f32) / 255.0, 1.0), // Cyan to Blue
+        1024..=1279 => ((phase as f32 - 1024.0) / 255.0, 0.0, 1.0), // Blue to Magenta
+        _ => (1.0, 0.0, (1535.0 - phase as f32) / 255.0), // Magenta to Red
+    };
+
+    Vector4::new(r, g, b, 1.0)
 }

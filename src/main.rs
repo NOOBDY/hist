@@ -1,6 +1,7 @@
 use anyhow::Context;
-use cgmath::Vector4;
+use clap::Parser;
 use hist::*;
+use std::path::PathBuf;
 use std::sync::Arc;
 use vulkano::buffer::allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo};
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
@@ -30,6 +31,15 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::Window;
 
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(short, default_value = "./shader/test.vert.spv")]
+    vertex: PathBuf,
+
+    #[arg(short, default_value = "./shader/test.frag.spv")]
+    fragment: PathBuf,
+}
+
 struct VkContext {
     device: Arc<Device>,
     queue: Arc<Queue>,
@@ -48,23 +58,13 @@ struct VkContext {
     command_buffers: Vec<Arc<PrimaryAutoCommandBuffer>>,
 }
 
-fn rgb_cycle(counter: i32) -> Vector4<f32> {
-    let phase = (counter % 1536) as u32; // Cycle through 1536 steps (256 * 6)
-                                         //
-    let (r, g, b) = match phase {
-        0..=255 => (1.0, phase as f32 / 255.0, 0.0), // Red to Yellow
-        256..=511 => ((511.0 - phase as f32) / 255.0, 1.0, 0.0), // Yellow to Green
-        512..=767 => (0.0, 1.0, (phase as f32 - 512.0) / 255.0), // Green to Cyan
-        768..=1023 => (0.0, (1023.0 - phase as f32) / 255.0, 1.0), // Cyan to Blue
-        1024..=1279 => ((phase as f32 - 1024.0) / 255.0, 0.0, 1.0), // Blue to Magenta
-        _ => (1.0, 0.0, (1535.0 - phase as f32) / 255.0), // Magenta to Red
-    };
-
-    Vector4::new(r, g, b, 1.0)
-}
-
 impl VkContext {
-    fn new(window: Arc<Window>, event_loop: &impl HasDisplayHandle) -> anyhow::Result<VkContext> {
+    fn new(
+        window: Arc<Window>,
+        event_loop: &impl HasDisplayHandle,
+        vs_filepath: &PathBuf,
+        fs_filepath: &PathBuf,
+    ) -> anyhow::Result<VkContext> {
         let library = VulkanLibrary::new()?;
         let required_extensions = Surface::required_extensions(&event_loop)?;
         let instance = Instance::new(
@@ -183,9 +183,9 @@ impl VkContext {
             },
         );
 
-        let vs = load_shader(device.clone(), "./shader/test.vert.spv")
-            .context("failed to create vertex shader")?;
-        let fs = load_shader(device.clone(), "./shader/test.frag.spv")
+        let vs =
+            load_shader(device.clone(), &vs_filepath).context("failed to create vertex shader")?;
+        let fs = load_shader(device.clone(), &fs_filepath)
             .context("failed to create fragment shader")?;
 
         let viewport = Viewport {
@@ -272,6 +272,9 @@ impl VkContext {
 
 #[derive(Default)]
 struct App {
+    vs_filepath: PathBuf,
+    fs_filepath: PathBuf,
+
     window: Option<Arc<Window>>,
     context: Option<VkContext>,
 
@@ -312,7 +315,13 @@ impl ApplicationHandler for App {
                 );
                 self.window = Some(window.clone());
 
-                let vk_context = VkContext::new(window.clone(), &event_loop).unwrap();
+                let vk_context = VkContext::new(
+                    window.clone(),
+                    &event_loop,
+                    &self.vs_filepath,
+                    &self.fs_filepath,
+                )
+                .unwrap();
 
                 let frames_in_flight = vk_context.images.len();
                 self.fences = vec![None; frames_in_flight];
@@ -400,10 +409,11 @@ impl ApplicationHandler for App {
                 *swapchain = new_swapchain;
                 let new_framebuffers = get_framebuffers(&new_images, render_pass.clone()).unwrap();
 
-                //     if self.windows_resized {
-                //         self.windows_resized = false;
+                if self.windows_resized {
+                    self.windows_resized = false;
 
-                viewport.extent = new_dimensions.into();
+                    viewport.extent = new_dimensions.into();
+                }
                 let new_pipeline = get_pipeline(
                     device.clone(),
                     vs.clone(),
@@ -424,8 +434,6 @@ impl ApplicationHandler for App {
                     &index_buffer,
                 )
                 .unwrap();
-                //     }
-                // }
 
                 let (image_i, suboptimal, acquire_future) =
                     match swapchain::acquire_next_image(swapchain.clone(), None)
@@ -488,8 +496,18 @@ impl ApplicationHandler for App {
 fn main() -> anyhow::Result<()> {
     let event_loop = EventLoop::new()?;
 
+    let args = Args::parse();
+
+    println!("{:?}", args.vertex);
+    println!("{:?}", args.fragment);
+
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App::default();
+    let mut app = App {
+        vs_filepath: args.vertex,
+        fs_filepath: args.fragment,
+        ..Default::default()
+    };
+
     event_loop.run_app(&mut app).map_err(Into::into)
 }
