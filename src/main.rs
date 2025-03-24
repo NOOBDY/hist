@@ -7,9 +7,7 @@ use std::sync::Arc;
 use vulkano::buffer::allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo};
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
-use vulkano::command_buffer::{
-    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryCommandBufferAbstract, RenderPassBeginInfo,
-};
+use vulkano::command_buffer::{AutoCommandBufferBuilder, CommandBufferUsage, RenderPassBeginInfo};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
 use vulkano::descriptor_set::layout::DescriptorBindingFlags;
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
@@ -193,11 +191,11 @@ impl App {
             indices,
         )?;
 
-        let uploads = AutoCommandBufferBuilder::primary(
-            command_buffer_allocator.clone(),
-            queue.queue_family_index(),
-            CommandBufferUsage::OneTimeSubmit,
-        )?;
+        // let uploads = AutoCommandBufferBuilder::primary(
+        //     command_buffer_allocator.clone(),
+        //     queue.queue_family_index(),
+        //     CommandBufferUsage::OneTimeSubmit,
+        // )?;
 
         // let data = UB {
         //     color: Vector4::new(1.0, 0.0, 0.0, 1.0),
@@ -217,7 +215,7 @@ impl App {
         //     data,
         // )?;
 
-        let _ = uploads.build()?.execute(queue.clone())?;
+        // let _ = uploads.build()?.execute(queue.clone())?;
 
         Ok(App {
             vs_filepath,
@@ -311,7 +309,6 @@ impl App {
 
                 println!("{:?}", fs.info().descriptor_binding_requirements);
 
-                // NOTE: perhaps unnecessary?
                 let binding = layout_create_info.set_layouts[0]
                     .bindings
                     .get_mut(&0)
