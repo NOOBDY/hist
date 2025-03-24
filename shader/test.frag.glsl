@@ -10,5 +10,5 @@ layout(set = 0, binding = 0) uniform UB {
 
 void main() {
     // f_color = vec4(uv, 0.0, 1.0);
-    f_color = ub.color * vec4(uv, 0.0, 1.0);
+    f_color = ub.color * (vec4(uv, 0.0, 1.0) + 0.5);
 }

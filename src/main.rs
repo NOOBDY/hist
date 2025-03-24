@@ -65,6 +65,8 @@ struct VkContext {
 }
 
 struct App {
+    counter: i32,
+
     vs_filepath: PathBuf,
     fs_filepath: PathBuf,
 
@@ -218,6 +220,7 @@ impl App {
         // let _ = uploads.build()?.execute(queue.clone())?;
 
         Ok(App {
+            counter: 0,
             vs_filepath,
             fs_filepath,
             instance,
@@ -453,15 +456,12 @@ impl App {
                     ctx.recreate_swapchain = true;
                 }
 
+                self.counter += 1;
+
                 let buf = self.uniform_buffer_allocator.allocate_sized()?;
 
                 let ub = UB {
-                    color: Vector4 {
-                        x: 0.0,
-                        y: 1.0,
-                        z: 1.0,
-                        w: 1.0,
-                    },
+                    color: rgb_cycle(self.counter),
                 };
 
                 *buf.write().unwrap() = ub;
