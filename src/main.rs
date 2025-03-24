@@ -1,4 +1,5 @@
 use anyhow::Context;
+use cgmath::Vector4;
 use clap::Parser;
 use hist::*;
 use std::path::PathBuf;
@@ -6,29 +7,42 @@ use std::sync::Arc;
 use vulkano::buffer::allocator::{SubbufferAllocator, SubbufferAllocatorCreateInfo};
 use vulkano::buffer::{Buffer, BufferCreateInfo, BufferUsage, Subbuffer};
 use vulkano::command_buffer::allocator::StandardCommandBufferAllocator;
-use vulkano::command_buffer::{CommandBufferExecFuture, PrimaryAutoCommandBuffer};
+use vulkano::command_buffer::{
+    AutoCommandBufferBuilder, CommandBufferUsage, PrimaryCommandBufferAbstract, RenderPassBeginInfo,
+};
 use vulkano::descriptor_set::allocator::StandardDescriptorSetAllocator;
+use vulkano::descriptor_set::layout::DescriptorBindingFlags;
 use vulkano::descriptor_set::{DescriptorSet, WriteDescriptorSet};
-use vulkano::device::{Device, DeviceCreateInfo, DeviceExtensions, Queue, QueueCreateInfo};
-use vulkano::image::{Image, ImageUsage};
+use vulkano::device::{
+    Device, DeviceCreateInfo, DeviceExtensions, DeviceFeatures, Queue, QueueCreateInfo,
+};
+use vulkano::image::ImageUsage;
 use vulkano::instance::{Instance, InstanceCreateFlags, InstanceCreateInfo};
 use vulkano::library::VulkanLibrary;
 use vulkano::memory::allocator::{AllocationCreateInfo, MemoryTypeFilter, StandardMemoryAllocator};
-use vulkano::pipeline::graphics::viewport::Viewport;
-use vulkano::pipeline::Pipeline;
-use vulkano::render_pass::RenderPass;
-use vulkano::shader::ShaderModule;
-use vulkano::swapchain::{
-    self, PresentFuture, Surface, Swapchain, SwapchainAcquireFuture, SwapchainCreateInfo,
-    SwapchainPresentInfo,
+use vulkano::pipeline::graphics::color_blend::{
+    AttachmentBlend, ColorBlendAttachmentState, ColorBlendState,
 };
-use vulkano::sync::future::{FenceSignalFuture, JoinFuture};
+use vulkano::pipeline::graphics::input_assembly::InputAssemblyState;
+use vulkano::pipeline::graphics::multisample::MultisampleState;
+use vulkano::pipeline::graphics::rasterization::RasterizationState;
+use vulkano::pipeline::graphics::vertex_input::{Vertex, VertexDefinition};
+use vulkano::pipeline::graphics::viewport::{Viewport, ViewportState};
+use vulkano::pipeline::graphics::GraphicsPipelineCreateInfo;
+use vulkano::pipeline::layout::PipelineDescriptorSetLayoutCreateInfo;
+use vulkano::pipeline::{
+    DynamicState, GraphicsPipeline, Pipeline, PipelineBindPoint, PipelineLayout,
+    PipelineShaderStageCreateInfo,
+};
+use vulkano::render_pass::{Framebuffer, RenderPass, Subpass};
+use vulkano::swapchain::{
+    acquire_next_image, Surface, Swapchain, SwapchainCreateInfo, SwapchainPresentInfo,
+};
 use vulkano::sync::{self, GpuFuture};
 use vulkano::{Validated, VulkanError};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ControlFlow, EventLoop};
-use winit::raw_window_handle::HasDisplayHandle;
 use winit::window::Window;
 
 #[derive(Parser, Debug)]
@@ -41,30 +55,38 @@ struct Args {
 }
 
 struct VkContext {
-    device: Arc<Device>,
-    queue: Arc<Queue>,
+    window: Arc<Window>,
     swapchain: Arc<Swapchain>,
-    images: Vec<Arc<Image>>,
     render_pass: Arc<RenderPass>,
+    framebuffers: Vec<Arc<Framebuffer>>,
+    pipeline: Arc<GraphicsPipeline>,
     viewport: Viewport,
-    vs: Arc<ShaderModule>,
-    fs: Arc<ShaderModule>,
-    vertex_buffer: Subbuffer<[MyVertex]>,
-    index_buffer: Subbuffer<[u32]>,
-    uniform_buffer_allocator: SubbufferAllocator,
     descriptor_set: Arc<DescriptorSet>,
-    descriptor_set_layout_index: u32,
-    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
-    command_buffers: Vec<Arc<PrimaryAutoCommandBuffer>>,
+    recreate_swapchain: bool,
+    previous_frame_end: Option<Box<dyn GpuFuture>>,
 }
 
-impl VkContext {
+struct App {
+    vs_filepath: PathBuf,
+    fs_filepath: PathBuf,
+
+    instance: Arc<Instance>,
+    device: Arc<Device>,
+    queue: Arc<Queue>,
+    descriptor_set_allocator: Arc<StandardDescriptorSetAllocator>,
+    command_buffer_allocator: Arc<StandardCommandBufferAllocator>,
+    uniform_buffer_allocator: SubbufferAllocator,
+    vertex_buffer: Subbuffer<[MyVertex]>,
+    index_buffer: Subbuffer<[u32]>,
+    rcx: Option<VkContext>,
+}
+
+impl App {
     fn new(
-        window: Arc<Window>,
-        event_loop: &impl HasDisplayHandle,
-        vs_filepath: &PathBuf,
-        fs_filepath: &PathBuf,
-    ) -> anyhow::Result<VkContext> {
+        event_loop: &EventLoop<()>,
+        vs_filepath: PathBuf,
+        fs_filepath: PathBuf,
+    ) -> anyhow::Result<App> {
         let library = VulkanLibrary::new()?;
         let required_extensions = Surface::required_extensions(&event_loop)?;
         let instance = Instance::new(
@@ -76,15 +98,13 @@ impl VkContext {
             },
         )?;
 
-        let surface = Surface::from_window(instance.clone(), window.clone())?;
-
         let device_extensions = DeviceExtensions {
             khr_swapchain: true,
             ..DeviceExtensions::empty()
         };
 
         let (physical_device, queue_family_index) =
-            select_physical_device(&instance, &surface, &device_extensions)?;
+            select_physical_device(&instance, event_loop, &device_extensions)?;
 
         let (device, mut queues) = Device::new(
             physical_device.clone(),
@@ -94,6 +114,14 @@ impl VkContext {
                     ..Default::default()
                 }],
                 enabled_extensions: device_extensions,
+                enabled_features: DeviceFeatures {
+                    descriptor_indexing: true,
+                    shader_sampled_image_array_non_uniform_indexing: true,
+                    runtime_descriptor_array: true,
+                    descriptor_binding_variable_descriptor_count: true,
+                    ..DeviceFeatures::empty()
+                },
+
                 ..Default::default()
             },
         )
@@ -101,35 +129,27 @@ impl VkContext {
 
         let queue = queues.next().context("no queue found")?;
 
-        let caps = physical_device
-            .surface_capabilities(&surface, Default::default())
-            .context("failed to get surface capabilities")?;
+        let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
 
-        let dimensions = window.inner_size();
-        let composite_alpha = caps
-            .supported_composite_alpha
-            .into_iter()
-            .next()
-            .context("no supported composite alpha found")?;
-        let image_format = physical_device.surface_formats(&surface, Default::default())?[0].0;
-
-        let (swapchain, images) = Swapchain::new(
+        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
             device.clone(),
-            surface,
-            SwapchainCreateInfo {
-                min_image_count: caps.min_image_count + 1,
-                image_format,
-                image_extent: dimensions.into(),
-                image_usage: ImageUsage::COLOR_ATTACHMENT,
-                composite_alpha,
+            Default::default(),
+        ));
+
+        let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
+            device.clone(),
+            Default::default(),
+        ));
+
+        let uniform_buffer_allocator = SubbufferAllocator::new(
+            memory_allocator.clone(),
+            SubbufferAllocatorCreateInfo {
+                buffer_usage: BufferUsage::UNIFORM_BUFFER,
+                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
                 ..Default::default()
             },
-        )?;
-
-        let render_pass = get_render_pass(device.clone(), &swapchain)?;
-        let framebuffers = get_framebuffers(&images, render_pass.clone())?;
-
-        let memory_allocator = Arc::new(StandardMemoryAllocator::new_default(device.clone()));
+        );
 
         let vertex1 = MyVertex {
             position: [1.0, 1.0],
@@ -173,323 +193,370 @@ impl VkContext {
             indices,
         )?;
 
-        let uniform_buffer_allocator = SubbufferAllocator::new(
-            memory_allocator.clone(),
-            SubbufferAllocatorCreateInfo {
-                buffer_usage: BufferUsage::UNIFORM_BUFFER,
-                memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
-                    | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
-                ..Default::default()
-            },
-        );
+        let uploads = AutoCommandBufferBuilder::primary(
+            command_buffer_allocator.clone(),
+            queue.queue_family_index(),
+            CommandBufferUsage::OneTimeSubmit,
+        )?;
 
-        let vs =
-            load_shader(device.clone(), &vs_filepath).context("failed to create vertex shader")?;
-        let fs = load_shader(device.clone(), &fs_filepath)
-            .context("failed to create fragment shader")?;
+        // let data = UB {
+        //     color: Vector4::new(1.0, 0.0, 0.0, 1.0),
+        // };
+
+        // let buf = Buffer::from_data(
+        //     memory_allocator.clone(),
+        //     BufferCreateInfo {
+        //         usage: BufferUsage::UNIFORM_BUFFER,
+        //         ..Default::default()
+        //     },
+        //     AllocationCreateInfo {
+        //         memory_type_filter: MemoryTypeFilter::PREFER_DEVICE
+        //             | MemoryTypeFilter::HOST_SEQUENTIAL_WRITE,
+        //         ..Default::default()
+        //     },
+        //     data,
+        // )?;
+
+        let _ = uploads.build()?.execute(queue.clone())?;
+
+        Ok(App {
+            vs_filepath,
+            fs_filepath,
+            instance,
+            device,
+            queue,
+            descriptor_set_allocator,
+            command_buffer_allocator,
+            uniform_buffer_allocator,
+            vertex_buffer,
+            index_buffer,
+            rcx: None,
+        })
+    }
+
+    fn resumed_internal(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+    ) -> anyhow::Result<()> {
+        let window = Arc::new(event_loop.create_window(Window::default_attributes())?);
+        let surface = Surface::from_window(self.instance.clone(), window.clone())?;
+        let window_size = window.inner_size();
+
+        let (swapchain, images) = {
+            let surface_capabilites = self
+                .device
+                .physical_device()
+                .surface_capabilities(&surface, Default::default())?;
+
+            let (image_format, _) = self
+                .device
+                .physical_device()
+                .surface_formats(&surface, Default::default())?[0];
+
+            Swapchain::new(
+                self.device.clone(),
+                surface,
+                SwapchainCreateInfo {
+                    min_image_count: surface_capabilites.min_image_count.max(2),
+                    image_format,
+                    image_extent: window_size.into(),
+                    image_usage: ImageUsage::COLOR_ATTACHMENT,
+                    composite_alpha: surface_capabilites
+                        .supported_composite_alpha
+                        .into_iter()
+                        .next()
+                        .context("")?,
+                    ..Default::default()
+                },
+            )?
+        };
+
+        let render_pass = vulkano::single_pass_renderpass! {
+            self.device.clone(),
+            attachments: {
+                color: {
+                    format: swapchain.image_format(),
+                    samples: 1,
+                    load_op: Clear,
+                    store_op: Store,
+                },
+            },
+            pass: {
+                color: [color],
+                depth_stencil: {},
+            }
+        }?;
+
+        let framebuffers = get_framebuffers(&images, &render_pass)?;
+
+        let pipeline = {
+            let vs = load_shader(self.device.clone(), &self.vs_filepath)?
+                .entry_point("main")
+                .context("entry point not found")?;
+            let fs = load_shader(self.device.clone(), &self.fs_filepath)?
+                .entry_point("main")
+                .context("entry point not found")?;
+
+            let vertex_input_state = MyVertex::per_vertex().definition(&vs)?;
+            let stages = [
+                PipelineShaderStageCreateInfo::new(vs.clone()),
+                PipelineShaderStageCreateInfo::new(fs.clone()),
+            ];
+
+            let layout = {
+                let mut layout_create_info =
+                    PipelineDescriptorSetLayoutCreateInfo::from_stages(&stages);
+
+                println!("{:?}", layout_create_info.set_layouts[0].bindings);
+
+                println!("{:?}", fs.info().descriptor_binding_requirements);
+
+                // NOTE: perhaps unnecessary?
+                let binding = layout_create_info.set_layouts[0]
+                    .bindings
+                    .get_mut(&0)
+                    .context("binding not found")?;
+                binding.binding_flags |= DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT;
+                binding.descriptor_count = 1;
+
+                PipelineLayout::new(
+                    self.device.clone(),
+                    layout_create_info.into_pipeline_layout_create_info(self.device.clone())?,
+                )?
+            };
+
+            let subpass = Subpass::from(render_pass.clone(), 0).context("subpass not found")?;
+
+            GraphicsPipeline::new(
+                self.device.clone(),
+                None,
+                GraphicsPipelineCreateInfo {
+                    stages: stages.into_iter().collect(),
+                    vertex_input_state: Some(vertex_input_state),
+                    input_assembly_state: Some(InputAssemblyState::default()),
+                    viewport_state: Some(ViewportState::default()),
+                    rasterization_state: Some(RasterizationState::default()),
+                    multisample_state: Some(MultisampleState::default()),
+                    color_blend_state: Some(ColorBlendState::with_attachment_states(
+                        subpass.num_color_attachments(),
+                        ColorBlendAttachmentState {
+                            blend: Some(AttachmentBlend::alpha()),
+                            ..Default::default()
+                        },
+                    )),
+                    dynamic_state: [DynamicState::Viewport].into_iter().collect(),
+                    subpass: Some(subpass.into()),
+                    ..GraphicsPipelineCreateInfo::layout(layout)
+                },
+            )?
+        };
 
         let viewport = Viewport {
             offset: [0.0, 0.0],
-            extent: window.inner_size().into(),
+            extent: window_size.into(),
             depth_range: 0.0..=1.0,
         };
 
-        let pipeline = get_pipeline(
-            device.clone(),
-            vs.clone(),
-            fs.clone(),
-            render_pass.clone(),
-            viewport.clone(),
-        )?;
-
-        let descriptor_set_allocator = Arc::new(StandardDescriptorSetAllocator::new(
-            device.clone(),
-            Default::default(),
-        ));
-
-        let uniform_buffer = uniform_buffer_allocator.allocate_sized()?;
+        let buf = self.uniform_buffer_allocator.allocate_sized()?;
 
         let ub = UB {
-            color: cgmath::Vector4 {
-                x: 0.0,
+            color: Vector4 {
+                x: 1.0,
                 y: 1.0,
                 z: 1.0,
-                w: 1.0,
+                w: 0.0,
             },
         };
 
-        *uniform_buffer.write().unwrap() = ub;
+        *buf.write().unwrap() = ub;
 
-        let descriptor_set_layout_index = 0;
-        let descriptor_set_layout = pipeline
-            .layout()
-            .set_layouts()
-            .get(descriptor_set_layout_index)
-            .unwrap();
-
-        let descriptor_set = DescriptorSet::new(
-            descriptor_set_allocator.clone(),
-            descriptor_set_layout.clone(),
-            [WriteDescriptorSet::buffer(0, uniform_buffer.clone())],
+        let layout = &pipeline.layout().set_layouts()[0];
+        let descriptor_set = DescriptorSet::new_variable(
+            self.descriptor_set_allocator.clone(),
+            layout.clone(),
+            1,
+            [WriteDescriptorSet::buffer(0, buf)],
             [],
         )?;
 
-        let command_buffer_allocator = Arc::new(StandardCommandBufferAllocator::new(
-            device.clone(),
-            Default::default(),
-        ));
+        let previous_frame_end = Some(sync::now(self.device.clone()).boxed());
 
-        let command_buffers = get_command_buffers(
-            &command_buffer_allocator,
-            &queue,
-            &pipeline,
-            &framebuffers,
-            &descriptor_set,
-            descriptor_set_layout_index as u32,
-            &vertex_buffer,
-            &index_buffer,
-        )?;
-
-        Ok(VkContext {
-            device,
-            queue,
+        self.rcx = Some(VkContext {
+            window,
             swapchain,
-            images,
             render_pass,
+            framebuffers,
+            pipeline,
             viewport,
-            vs,
-            fs,
-            vertex_buffer,
-            index_buffer,
-            uniform_buffer_allocator,
             descriptor_set,
-            descriptor_set_layout_index: descriptor_set_layout_index as u32,
-            command_buffer_allocator,
-            command_buffers,
-        })
-    }
-}
+            recreate_swapchain: false,
+            previous_frame_end,
+        });
 
-#[derive(Default)]
-struct App {
-    vs_filepath: PathBuf,
-    fs_filepath: PathBuf,
-
-    window: Option<Arc<Window>>,
-    context: Option<VkContext>,
-
-    windows_resized: bool,
-    recreate_swapchain: bool,
-
-    counter: i32,
-
-    fences: Vec<
-        Option<
-            Arc<
-                FenceSignalFuture<
-                    PresentFuture<
-                        CommandBufferExecFuture<
-                            JoinFuture<Box<dyn GpuFuture>, SwapchainAcquireFuture>,
-                        >,
-                    >,
-                >,
-            >,
-        >,
-    >,
-    previous_fence_i: u32,
-}
-
-impl ApplicationHandler for App {
-    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
-        let attributes = Window::default_attributes();
-
-        if let Ok(window) = event_loop.create_window(attributes) {
-            let first_window_handle = self.window.is_none();
-            let _window_handle = Arc::new(window);
-
-            if first_window_handle {
-                let window = Arc::new(
-                    event_loop
-                        .create_window(Window::default_attributes().with_visible(true))
-                        .unwrap(),
-                );
-                self.window = Some(window.clone());
-
-                let vk_context = VkContext::new(
-                    window.clone(),
-                    &event_loop,
-                    &self.vs_filepath,
-                    &self.fs_filepath,
-                )
-                .unwrap();
-
-                let frames_in_flight = vk_context.images.len();
-                self.fences = vec![None; frames_in_flight];
-
-                self.context = Some(vk_context);
-            }
-        }
+        Ok(())
     }
 
-    fn window_event(
+    fn window_event_internal(
         &mut self,
         event_loop: &winit::event_loop::ActiveEventLoop,
         _window_id: winit::window::WindowId,
         event: winit::event::WindowEvent,
-    ) {
+    ) -> anyhow::Result<()> {
+        let ctx = self.rcx.as_mut().context("no vk context found")?;
+
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
             WindowEvent::Resized(_) => {
-                self.window
-                    .as_ref()
-                    .expect("resize without a window")
-                    .request_redraw();
-
-                self.windows_resized = true;
+                ctx.recreate_swapchain = true;
             }
             WindowEvent::RedrawRequested => {
-                let window = self
-                    .window
-                    .as_ref()
-                    .expect("redraw request without a window");
+                let window_size = ctx.window.inner_size();
 
-                window.pre_present_notify();
-                window.request_redraw();
+                if window_size.width == 0 || window_size.height == 0 {
+                    return Ok(());
+                }
 
-                let VkContext {
-                    device,
-                    queue,
-                    ref mut swapchain,
-                    render_pass,
-                    ref mut viewport,
-                    vs,
-                    fs,
-                    vertex_buffer,
-                    index_buffer,
-                    uniform_buffer_allocator,
-                    ref mut descriptor_set,
-                    descriptor_set_layout_index,
-                    command_buffer_allocator,
-                    ref mut command_buffers,
-                    ..
-                } = self.context.as_mut().expect("no context found");
+                ctx.previous_frame_end
+                    .as_mut()
+                    .context("previous_frame_end is None")?
+                    .cleanup_finished();
 
-                self.counter += 1;
+                if ctx.recreate_swapchain {
+                    let (new_swapchain, new_images) =
+                        ctx.swapchain.recreate(SwapchainCreateInfo {
+                            image_extent: window_size.into(),
+                            ..ctx.swapchain.create_info()
+                        })?;
 
-                println!("{}", self.counter);
+                    ctx.swapchain = new_swapchain;
+                    ctx.framebuffers = get_framebuffers(&new_images, &ctx.render_pass)?;
+                    ctx.viewport.extent = window_size.into();
+                    ctx.recreate_swapchain = false;
+                }
 
-                let uniform_buffer = uniform_buffer_allocator.allocate_sized().unwrap();
-
-                let ub = UB {
-                    color: rgb_cycle(self.counter),
+                let (image_index, suboptimal, acquire_future) = match acquire_next_image(
+                    ctx.swapchain.clone(),
+                    None,
+                )
+                .map_err(Validated::unwrap)
+                {
+                    Ok(r) => r,
+                    Err(VulkanError::OutOfDate) => {
+                        ctx.recreate_swapchain = true;
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("failed to acquire next image: {e}"));
+                    }
                 };
-
-                *uniform_buffer.write().unwrap() = ub;
-
-                // i have no fucking idea
-                unsafe {
-                    descriptor_set
-                        .update_by_ref([WriteDescriptorSet::buffer(0, uniform_buffer.clone())], [])
-                        .unwrap();
-                }
-
-                // if self.windows_resized || self.recreate_swapchain {
-                self.recreate_swapchain = false;
-                let new_dimensions = window.inner_size();
-
-                let (new_swapchain, new_images) = swapchain
-                    .recreate(SwapchainCreateInfo {
-                        image_extent: new_dimensions.into(),
-                        ..swapchain.create_info()
-                    })
-                    .unwrap();
-
-                *swapchain = new_swapchain;
-                let new_framebuffers = get_framebuffers(&new_images, render_pass.clone()).unwrap();
-
-                if self.windows_resized {
-                    self.windows_resized = false;
-
-                    viewport.extent = new_dimensions.into();
-                }
-                let new_pipeline = get_pipeline(
-                    device.clone(),
-                    vs.clone(),
-                    fs.clone(),
-                    render_pass.clone(),
-                    viewport.clone(),
-                )
-                .unwrap();
-
-                *command_buffers = get_command_buffers(
-                    &command_buffer_allocator,
-                    &queue,
-                    &new_pipeline,
-                    &new_framebuffers,
-                    &descriptor_set,
-                    *descriptor_set_layout_index,
-                    &vertex_buffer,
-                    &index_buffer,
-                )
-                .unwrap();
-
-                let (image_i, suboptimal, acquire_future) =
-                    match swapchain::acquire_next_image(swapchain.clone(), None)
-                        .map_err(Validated::unwrap)
-                    {
-                        Ok(r) => r,
-                        Err(VulkanError::OutOfDate) => {
-                            return;
-                        }
-                        Err(e) => panic!("failed to acquire next image: {e}"),
-                    };
 
                 if suboptimal {
-                    self.recreate_swapchain = true;
+                    ctx.recreate_swapchain = true;
                 }
 
-                if let Some(image_fence) = &self.fences[image_i as usize] {
-                    image_fence.wait(None).unwrap();
-                }
+                let buf = self.uniform_buffer_allocator.allocate_sized()?;
 
-                let previous_future = match self.fences[self.previous_fence_i as usize].clone() {
-                    None => {
-                        let mut now = sync::now(device.clone());
-                        now.cleanup_finished();
-
-                        now.boxed()
-                    }
-                    Some(fence) => fence.boxed(),
+                let ub = UB {
+                    color: Vector4 {
+                        x: 0.0,
+                        y: 1.0,
+                        z: 1.0,
+                        w: 1.0,
+                    },
                 };
 
-                let future = previous_future
+                *buf.write().unwrap() = ub;
+
+                unsafe {
+                    ctx.descriptor_set
+                        .update_by_ref([WriteDescriptorSet::buffer(0, buf)], [])?;
+                }
+
+                let mut builder = AutoCommandBufferBuilder::primary(
+                    self.command_buffer_allocator.clone(),
+                    self.queue.queue_family_index(),
+                    CommandBufferUsage::OneTimeSubmit,
+                )?;
+
+                builder
+                    .begin_render_pass(
+                        RenderPassBeginInfo {
+                            clear_values: vec![Some([0.0, 0.0, 0.0, 1.0].into())],
+                            ..RenderPassBeginInfo::framebuffer(
+                                ctx.framebuffers[image_index as usize].clone(),
+                            )
+                        },
+                        Default::default(),
+                    )?
+                    .set_viewport(0, [ctx.viewport.clone()].into_iter().collect())?
+                    .bind_pipeline_graphics(ctx.pipeline.clone())?
+                    .bind_descriptor_sets(
+                        PipelineBindPoint::Graphics,
+                        ctx.pipeline.layout().clone(),
+                        0,
+                        ctx.descriptor_set.clone(),
+                    )?
+                    .bind_vertex_buffers(0, self.vertex_buffer.clone())?
+                    .bind_index_buffer(self.index_buffer.clone())?;
+
+                unsafe {
+                    builder.draw_indexed(self.index_buffer.len() as u32, 1, 0, 0, 0)?;
+                }
+
+                builder.end_render_pass(Default::default())?;
+
+                let command_buffer = builder.build()?;
+                let future = ctx
+                    .previous_frame_end
+                    .take()
+                    .context("previous_frame_end is None")?
                     .join(acquire_future)
-                    .then_execute(queue.clone(), command_buffers[image_i as usize].clone())
-                    .unwrap()
+                    .then_execute(self.queue.clone(), command_buffer)?
                     .then_swapchain_present(
-                        queue.clone(),
-                        SwapchainPresentInfo::swapchain_image_index(swapchain.clone(), image_i),
+                        self.queue.clone(),
+                        SwapchainPresentInfo::swapchain_image_index(
+                            ctx.swapchain.clone(),
+                            image_index,
+                        ),
                     )
                     .then_signal_fence_and_flush();
 
-                self.fences[image_i as usize] = match future.map_err(Validated::unwrap) {
-                    Ok(value) => Some(Arc::new(value)),
+                match future.map_err(Validated::unwrap) {
+                    Ok(future) => ctx.previous_frame_end = Some(future.boxed()),
                     Err(VulkanError::OutOfDate) => {
-                        self.recreate_swapchain = true;
-                        None
+                        ctx.recreate_swapchain = true;
+                        ctx.previous_frame_end = Some(sync::now(self.device.clone()).boxed());
                     }
                     Err(e) => {
                         println!("failed to flush future: {e}");
-                        None
+                        ctx.previous_frame_end = Some(sync::now(self.device.clone()).boxed());
                     }
-                };
+                }
 
-                self.previous_fence_i = image_i;
+                ctx.window.request_redraw();
             }
-            _ => (),
+            _ => {}
         }
+
+        Ok(())
+    }
+}
+
+impl ApplicationHandler for App {
+    fn resumed(&mut self, event_loop: &winit::event_loop::ActiveEventLoop) {
+        self.resumed_internal(event_loop).unwrap();
+    }
+
+    fn window_event(
+        &mut self,
+        event_loop: &winit::event_loop::ActiveEventLoop,
+        window_id: winit::window::WindowId,
+        event: winit::event::WindowEvent,
+    ) {
+        self.window_event_internal(event_loop, window_id, event)
+            .unwrap();
     }
 }
 
@@ -503,11 +570,7 @@ fn main() -> anyhow::Result<()> {
 
     event_loop.set_control_flow(ControlFlow::Poll);
 
-    let mut app = App {
-        vs_filepath: args.vertex,
-        fs_filepath: args.fragment,
-        ..Default::default()
-    };
+    let mut app = App::new(&event_loop, args.vertex, args.fragment)?;
 
     event_loop.run_app(&mut app).map_err(Into::into)
 }

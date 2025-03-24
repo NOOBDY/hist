@@ -27,7 +27,8 @@ use vulkano::pipeline::{
 };
 use vulkano::render_pass::{Framebuffer, FramebufferCreateInfo, RenderPass, Subpass};
 use vulkano::shader::{ShaderModule, ShaderModuleCreateInfo};
-use vulkano::swapchain::{Surface, Swapchain};
+use vulkano::swapchain::Swapchain;
+use winit::event_loop::EventLoop;
 
 #[derive(BufferContents, Vertex)]
 #[repr(C)]
@@ -47,7 +48,7 @@ unsafe impl bytemuck::Zeroable for UB {}
 
 pub fn select_physical_device(
     instance: &Arc<Instance>,
-    surface: &Arc<Surface>,
+    event_loop: &EventLoop<()>,
     device_extensions: &DeviceExtensions,
 ) -> anyhow::Result<(Arc<PhysicalDevice>, u32)> {
     instance
@@ -59,8 +60,9 @@ pub fn select_physical_device(
                 .iter()
                 .enumerate()
                 .position(|(i, q)| {
-                    q.queue_flags.contains(QueueFlags::GRAPHICS)
-                        && p.surface_support(i as u32, &surface).unwrap_or(false)
+                    q.queue_flags.intersects(QueueFlags::GRAPHICS)
+                        && p.presentation_support(i as u32, event_loop)
+                            .unwrap_or(false)
                 })
                 .map(|q| (p, q as u32))
         })
@@ -98,20 +100,19 @@ pub fn get_render_pass(
 
 pub fn get_framebuffers(
     images: &[Arc<Image>],
-    render_pass: Arc<RenderPass>,
+    render_pass: &Arc<RenderPass>,
 ) -> anyhow::Result<Vec<Arc<Framebuffer>>> {
     images
         .iter()
         .map(|image| {
             let view = ImageView::new_default(image.clone())?;
-            let framebuffer = Framebuffer::new(
+            Ok(Framebuffer::new(
                 render_pass.clone(),
                 FramebufferCreateInfo {
                     attachments: vec![view],
                     ..Default::default()
                 },
-            )?;
-            Ok(framebuffer)
+            )?)
         })
         .collect()
 }
